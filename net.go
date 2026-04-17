@@ -307,6 +307,7 @@ func (m *Memberlist) handleConn(conn net.Conn) {
 			m.logger.Printf("[ERR] memberlist: Failed to read remote state: %s %s", err, LogConn(conn))
 			return
 		}
+		defer Free(userState)
 
 		if err := m.sendLocalState(conn, join, streamLabel); err != nil {
 			m.logger.Printf("[ERR] memberlist: Failed to push local state: %s %s", err, LogConn(conn))
@@ -948,6 +949,7 @@ func (m *Memberlist) sendUserMsg(a Address, sendBuf []byte) error {
 
 // sendAndReceiveState is used to initiate a push/pull over a stream with a
 // remote host.
+// The returned user state buffer must be freed by calling `Free` by caller.
 func (m *Memberlist) sendAndReceiveState(a Address, join bool) ([]pushNodeState, []byte, error) {
 	if a.Name == "" && m.config.RequireNodeNames {
 		return nil, nil, errNodeNamesAreRequired
@@ -1182,8 +1184,15 @@ func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType,
 			fmt.Errorf("Encryption is configured but remote state is not encrypted")
 	}
 
-	// Get the msgPack decoders
-	hd := codec.MsgpackHandle{}
+	// Get the msgPack decoders with larger MaxInitLen to avoid allocating small buffers
+	// repeatedly in codec Decode, to reduce GC pressure.
+	hd := codec.MsgpackHandle{
+		BasicHandle: codec.BasicHandle{
+			DecodeOptions: codec.DecodeOptions{
+				MaxInitLen: 4 << 20,
+			},
+		},
+	}
 	dec := codec.NewDecoder(bufConn, &hd)
 
 	// Check if we have a compressed message
@@ -1210,7 +1219,8 @@ func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType,
 	return msgType, bufConn, dec, nil
 }
 
-// readRemoteState is used to read the remote state from a connection
+// readRemoteState is used to read the remote state from a connection.
+// The returned user state buffer must be freed by calling `Free` by caller
 func (m *Memberlist) readRemoteState(bufConn io.Reader, dec *codec.Decoder) (bool, []pushNodeState, []byte, error) {
 	// Read the push/pull header
 	var header pushPullHeader
@@ -1231,7 +1241,7 @@ func (m *Memberlist) readRemoteState(bufConn io.Reader, dec *codec.Decoder) (boo
 	// Read the remote user state into a buffer
 	var userBuf []byte
 	if header.UserStateLen > 0 {
-		userBuf = make([]byte, header.UserStateLen)
+		userBuf = Alloc(header.UserStateLen)
 		bytes, err := io.ReadAtLeast(bufConn, userBuf, header.UserStateLen)
 		if err == nil && bytes != header.UserStateLen {
 			err = fmt.Errorf(

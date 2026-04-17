@@ -678,6 +678,7 @@ func (m *Memberlist) pushPullNode(a Address, join bool) error {
 	if err != nil {
 		return err
 	}
+	defer Free(userState)
 
 	if err := m.mergeRemoteState(join, remote, userState); err != nil {
 		return err
